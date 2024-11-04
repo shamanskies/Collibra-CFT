@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: AWS CFT v3.0 for deploying Collibra DGC node(s)
+Description: AWS CFT v3.0.1 for deploying Collibra DGC node(s)
 Metadata:
   "AWS::CloudFormation::Interface":
     ParameterGroups:
@@ -121,6 +121,7 @@ Conditions:
   BuildSGConsoleRule: !And [!Condition CreateNewSG, !Condition InstallCollibraConsoleCondition]
   BuildSGDGCRule: !And [!Condition CreateNewSG, !Condition InstallDGCCondition]
   BuildSGDQORule: !And [!Condition CreateNewSG, !Condition InstallDQOConnectCondition]
+ 
 
 Resources:
 #EBS Volume
@@ -156,7 +157,7 @@ Resources:
     Condition: BuildSGDGCRule
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
-      GroupId: !GetAtt rSG.GroupId
+      GroupId: !If [CreateNewSG, !GetAtt rSG.GroupId, !Ref SecurityGroup]
       CidrIp: 0.0.0.0/0
       IpProtocol: tcp
       FromPort: 4400
@@ -167,7 +168,7 @@ Resources:
     Condition: BuildSGConsoleRule
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
-      GroupId: !GetAtt rSG.GroupId
+      GroupId: !If [CreateNewSG, !GetAtt rSG.GroupId, !Ref SecurityGroup]
       CidrIp: !Ref AllowedCidr
       IpProtocol: tcp
       FromPort: 4402
@@ -178,7 +179,7 @@ Resources:
     Condition: BuildSGDQORule
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
-      GroupId: !GetAtt rSG.GroupId
+      GroupId: !If [CreateNewSG, !GetAtt rSG.GroupId, !Ref SecurityGroup]
       CidrIp: !Ref AllowedCidr
       IpProtocol: tcp
       FromPort: 8080
