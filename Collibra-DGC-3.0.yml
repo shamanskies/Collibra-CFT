@@ -1,0 +1,218 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: AWS CFT v3.0 for deploying Collibra DGC node(s)
+Metadata:
+  "AWS::CloudFormation::Interface":
+    ParameterGroups:
+      - Label:
+          default: "Network Parameters"
+        Parameters:
+          - "VPC"
+          - "Subnet"
+          - "CreateNewSGName"
+          - "SecurityGroup"
+          - "KeyName"
+          - "AllowedCidr"
+          - "AllowedCidrSSH"
+      - Label:
+          default: "Collibra Parameters"
+        Parameters:
+          - "TagName"
+          - "InstanceType"
+          - "DataVolumeSizeGB"
+          - "KMSKey"
+          - "InstallCollibraConsole"
+          - "InstallDGC"
+          - "InstallDQOConnect"
+Parameters:
+  TagName:
+    Type: String
+    Description: "value to apply for tag:name" 
+  VPC: 
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to place instance
+  Subnet:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet to place instance
+  CreateNewSGName:
+    Type: String
+    Description: Will you be creating a new security group? 
+    AllowedValues: 
+      - true 
+      - false
+    Default: false  
+  SecurityGroup:
+    Type: String
+    Default: "CollibraDG-SG"
+    Description: Enter exiting SecurityGroup to use or new name if you are having one created
+  KeyName:
+    Type: String
+    Default: ""
+    Description: The name of an existing EC2 key pair to enable SSH access to the instance.
+  AllowedCidr:
+    Type: String
+    MinLength: '9'
+    MaxLength: '18'
+    Default: 0.0.0.0/0
+    Description: Allowed CIDR for the Collibra Console
+    AllowedPattern: '(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})'
+    ConstraintDescription: Must be a valid IP CIDR range of the form x.x.x.x/x. (used for Collibra Console if creating a new SG)
+  AllowedCidrSSH:
+    Type: String
+    MinLength: '9'
+    MaxLength: '18'
+    Default: 0.0.0.0/0
+    AllowedPattern: '(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})'
+    ConstraintDescription: Must be a valid IP CIDR range of the form x.x.x.x/x. (used for SSH if creating a new SG)
+    Description: Allowed CIDR for SSH to the node. It is NOT recommeded to open it to 0.0.0.0/0
+  InstanceType:
+    Type: String
+    Default: "t3.xlarge"
+    AllowedValues:
+      - t3.large
+      - t3.xlarge 
+      - c5.large
+      - m5.xlarge
+      - m5.4xlarge
+      - m5d.4xlarge
+    Description: "Choose Instance Type"
+  DataVolumeSizeGB:
+    Type: String
+    Default: 30
+    Description: "Size of /opt volume for Collibra in GB"
+  KMSKey:
+    Type: String
+    Default: ""
+    Description: Enter KMS key to use for EBS encryption or leave blank to use account default/aws managed
+  InstallCollibraConsole:
+    Type: String
+    Description: Will this node include the Collibra Console 
+    AllowedValues: 
+      - true 
+      - false
+    Default: false
+  InstallDGC:
+    Type: String
+    Description: Will this node include the Collibra DGC 
+    AllowedValues: 
+      - true 
+      - false
+    Default: false
+  InstallDQOConnect:
+    Type: String
+    Description: Will DQO connect to this node 
+    AllowedValues: 
+      - true 
+      - false
+    Default: false
+
+Mappings:
+  RegionMap:
+    us-east-1:
+      "HVM64": ami-051d4f575d950eff0
+    us-east-2:
+      "HVM64": ami-051d4f575d950eff0
+
+Conditions:
+  InstallCollibraConsoleCondition: !Equals [ !Ref InstallCollibraConsole, true]
+  InstallDGCCondition: !Equals [ !Ref InstallDGC, true]
+  InstallDQOConnectCondition: !Equals [ !Ref InstallDQOConnect, true]
+  ProvideKMSKey: !Not [!Equals [ !Ref KMSKey, ""]]
+  CreateNewSG: !Equals [ !Ref CreateNewSGName, true]
+  BuildSGConsoleRule: !And [!Condition CreateNewSG, !Condition InstallCollibraConsoleCondition]
+  BuildSGDGCRule: !And [!Condition CreateNewSG, !Condition InstallDGCCondition]
+  BuildSGDQORule: !And [!Condition CreateNewSG, !Condition InstallDQOConnectCondition]
+
+Resources:
+#EBS Volume
+  rDataVolume:
+    Type: AWS::EC2::Volume
+    Properties:
+      VolumeType: gp2
+      AvailabilityZone: !GetAtt rInstance.AvailabilityZone
+      Size: !Ref DataVolumeSizeGB
+      KmsKeyId: !If [ProvideKMSKey, !Ref KMSKey, !Ref AWS::NoValue]
+
+#SecurityGroup
+  rSG:
+    Condition: CreateNewSG
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Ref SecurityGroup
+      GroupDescription: created by cloudformation
+      VpcId: !Ref VPC
+
+  rCollibraSSHRule:
+    Condition: CreateNewSG
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt rSG.GroupId
+      CidrIp: !Ref AllowedCidrSSH
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      Description: Collibra Shell
+
+  rCollibraDGRule:
+    Condition: BuildSGDGCRule
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt rSG.GroupId
+      CidrIp: 0.0.0.0/0
+      IpProtocol: tcp
+      FromPort: 4400
+      ToPort: 4400
+      Description: Collibra DGC
+
+  rCollibraConsoleRule:
+    Condition: BuildSGConsoleRule
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt rSG.GroupId
+      CidrIp: !Ref AllowedCidr
+      IpProtocol: tcp
+      FromPort: 4402
+      ToPort: 4402
+      Description: Collibra Console
+  
+  rCollibraDQORule:
+    Condition: BuildSGDQORule
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt rSG.GroupId
+      CidrIp: !Ref AllowedCidr
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      Description: Collibra DQ
+
+#Instance
+  rInstance:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !FindInMap
+        - RegionMap
+        - !Ref "AWS::Region"
+        - HVM64
+      KeyName: !Ref KeyName
+      SecurityGroupIds:
+        - !If [CreateNewSG, !GetAtt rSG.GroupId, !Ref SecurityGroup]
+      Tags:
+        - Key: Name
+          Value: !Ref TagName
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+          - "\n"
+          - - '#!/bin/bash'
+            - 'echo "Hello, World!"'
+            - '/usr/local/collibra/mount_disk.sh'
+      
+#Mount volume
+  rMountEBS:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref rInstance
+      VolumeId: !Ref rDataVolume
+      Device: /dev/sdf
+      KmsKeyId: !If [ProvideKMSKey, !Ref KMSKey, !Ref AWS::NoValue]
