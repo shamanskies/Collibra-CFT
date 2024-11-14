@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: AWS CFT v3.0.1 for deploying Collibra DGC node(s)
+Description: AWS CFT v3.3 for deploying Collibra DGC node(s)
 Metadata:
   "AWS::CloudFormation::Interface":
     ParameterGroups:
@@ -16,6 +16,7 @@ Metadata:
       - Label:
           default: "Collibra Parameters"
         Parameters:
+          - "NumberOfInstances"
           - "TagName"
           - "InstanceType"
           - "DataVolumeSizeGB"
@@ -24,6 +25,15 @@ Metadata:
           - "InstallDGC"
           - "InstallDQOConnect"
 Parameters:
+  NumberOfInstances:
+    Type: Number
+    Description: Number of instances to create (1-4)
+    Default: 1
+    AllowedValues:
+      - 1
+      - 2
+      - 3
+      - 4
   TagName:
     Type: String
     Description: "value to apply for tag:name" 
@@ -108,9 +118,9 @@ Parameters:
 Mappings:
   RegionMap:
     us-east-1:
-      "HVM64": ami-051d4f575d950eff0
+      "HVM64": ami-0583d8c7a9c35822c
     us-east-2:
-      "HVM64": ami-051d4f575d950eff0
+      "HVM64": ami-0583d8c7a9c35822c
 
 Conditions:
   InstallCollibraConsoleCondition: !Equals [ !Ref InstallCollibraConsole, true]
@@ -121,17 +131,11 @@ Conditions:
   BuildSGConsoleRule: !And [!Condition CreateNewSG, !Condition InstallCollibraConsoleCondition]
   BuildSGDGCRule: !And [!Condition CreateNewSG, !Condition InstallDGCCondition]
   BuildSGDQORule: !And [!Condition CreateNewSG, !Condition InstallDQOConnectCondition]
- 
+  CreateInstance2: !Or [!Equals [!Ref NumberOfInstances, 2], !Equals [!Ref NumberOfInstances, 3], !Equals [!Ref NumberOfInstances, 4]]
+  CreateInstance3: !Or [!Equals [!Ref NumberOfInstances, 3], !Equals [!Ref NumberOfInstances, 4]]
+  CreateInstance4: !Equals [!Ref NumberOfInstances, 4]
 
 Resources:
-#EBS Volume
-  rDataVolume:
-    Type: AWS::EC2::Volume
-    Properties:
-      VolumeType: gp3
-      AvailabilityZone: !GetAtt rInstance.AvailabilityZone
-      Size: !Ref DataVolumeSizeGB
-      KmsKeyId: !If [ProvideKMSKey, !Ref KMSKey, !Ref AWS::NoValue]
 
 #SecurityGroup
   rSG:
@@ -187,7 +191,7 @@ Resources:
       Description: Collibra DQ
 
 #Instance
-  rInstance:
+  rInstance1:
     Type: "AWS::EC2::Instance"
     Properties:
       InstanceType: !Ref InstanceType
@@ -200,20 +204,319 @@ Resources:
         - !If [CreateNewSG, !GetAtt rSG.GroupId, !Ref SecurityGroup]
       Tags:
         - Key: Name
-          Value: !Ref TagName
+          Value: !Sub "${TagName}-1"
       UserData:
         Fn::Base64:
           Fn::Join:
           - "\n"
           - - '#!/bin/bash'
-            - 'echo "Hello, World!"'
-            - '/usr/local/collibra/mount_disk.sh'
-      
-#Mount volume
-  rMountEBS:
+            - 'set -e'
+            - 'echo "Starting instance initialization..."'
+            - 'dnf update -y'
+            - 'dnf install -y lvm2 xfsprogs'
+            - 'echo "Installed necessary packages"'
+            - |
+              # Check for root privileges
+              if [ "$EUID" -ne 0 ]; then
+                  echo "Please run as root"
+                  exit 1
+              fi
+
+              # Check if /opt is already mounted
+              if mount | grep /opt > /dev/null; then
+                  echo "/opt is already mounted"
+                  exit 1
+              fi
+
+              # Check if /dev/nvme1n1 exists
+              if ! [ -b /dev/nvme1n1 ]; then
+                  echo "/dev/nvme1n1 does not exist"
+                  exit 1
+              fi
+
+              # Customize these variables according to your needs
+              VG_NAME="vg01"
+              ROOT_DEVICE="/dev/nvme1n1"
+
+              # Create LVM VG
+              echo "$ROOT_DEVICE exists. Creating LVM VG '$VG_NAME'..."
+              vgcreate "$VG_NAME" "$ROOT_DEVICE" || { echo "Error creating LVM VG '$VG_NAME'."; exit 1; }
+
+              # Create LVM LV 'opt' using all available space in 'vg01'
+              lvcreate -n opt -l 100%FREE "$VG_NAME" || { echo "Error creating LVM LV 'opt' in '$VG_NAME'."; exit 1; }
+
+              # Create a new XFS file system
+              mkfs.xfs "/dev/$VG_NAME/opt" || { echo "Error creating XFS file system."; exit 1; }
+
+              # Mount the new file system on /opt
+              mount "/dev/$VG_NAME/opt" /opt || { echo "Failed to mount /opt"; exit 1; }
+
+              # Add an entry to /etc/fstab to automount /opt on boot
+              echo "/dev/mapper/$VG_NAME-opt /opt xfs defaults 0 0" >> /etc/fstab || { echo "Failed to update /etc/fstab"; exit 1; }
+
+            - 'echo "Instance initialization completed successfully."'
+
+  rDataVolume1:
+    Type: AWS::EC2::Volume
+    Properties:
+      VolumeType: gp3
+      AvailabilityZone: !GetAtt rInstance1.AvailabilityZone
+      Size: !Ref DataVolumeSizeGB
+      KmsKeyId: !If [ProvideKMSKey, !Ref KMSKey, !Ref AWS::NoValue]
+
+  rMountEBS1:
     Type: AWS::EC2::VolumeAttachment
     Properties:
-      InstanceId: !Ref rInstance
-      VolumeId: !Ref rDataVolume
+      InstanceId: !Ref rInstance1
+      VolumeId: !Ref rDataVolume1
       Device: /dev/sdf
+
+  rInstance2:
+    Condition: CreateInstance2
+    Type: "AWS::EC2::Instance"
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !FindInMap
+        - RegionMap
+        - !Ref "AWS::Region"
+        - HVM64
+      KeyName: !Ref KeyName
+      SecurityGroupIds:
+        - !If [CreateNewSG, !GetAtt rSG.GroupId, !Ref SecurityGroup]
+      Tags:
+        - Key: Name
+          Value: !Sub "${TagName}-2"
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+          - "\n"
+          - - '#!/bin/bash'
+            - 'set -e'
+            - 'echo "Starting instance initialization..."'
+            - 'dnf update -y'
+            - 'dnf install -y lvm2 xfsprogs'
+            - 'echo "Installed necessary packages"'
+            - |
+              # Check for root privileges
+              if [ "$EUID" -ne 0 ]; then
+                  echo "Please run as root"
+                  exit 1
+              fi
+
+              # Check if /opt is already mounted
+              if mount | grep /opt > /dev/null; then
+                  echo "/opt is already mounted"
+                  exit 1
+              fi
+
+              # Check if /dev/nvme1n1 exists
+              if ! [ -b /dev/nvme1n1 ]; then
+                  echo "/dev/nvme1n1 does not exist"
+                  exit 1
+              fi
+
+              # Customize these variables according to your needs
+              VG_NAME="vg01"
+              ROOT_DEVICE="/dev/nvme1n1"
+
+              # Create LVM VG
+              echo "$ROOT_DEVICE exists. Creating LVM VG '$VG_NAME'..."
+              vgcreate "$VG_NAME" "$ROOT_DEVICE" || { echo "Error creating LVM VG '$VG_NAME'."; exit 1; }
+
+              # Create LVM LV 'opt' using all available space in 'vg01'
+              lvcreate -n opt -l 100%FREE "$VG_NAME" || { echo "Error creating LVM LV 'opt' in '$VG_NAME'."; exit 1; }
+
+              # Create a new XFS file system
+              mkfs.xfs "/dev/$VG_NAME/opt" || { echo "Error creating XFS file system."; exit 1; }
+
+              # Mount the new file system on /opt
+              mount "/dev/$VG_NAME/opt" /opt || { echo "Failed to mount /opt"; exit 1; }
+
+              # Add an entry to /etc/fstab to automount /opt on boot
+              echo "/dev/mapper/$VG_NAME-opt /opt xfs defaults 0 0" >> /etc/fstab || { echo "Failed to update /etc/fstab"; exit 1; }
+
+            - 'echo "Instance initialization completed successfully."'
+
+  rDataVolume2:
+    Condition: CreateInstance2
+    Type: AWS::EC2::Volume
+    Properties:
+      VolumeType: gp3
+      AvailabilityZone: !GetAtt rInstance2.AvailabilityZone
+      Size: !Ref DataVolumeSizeGB
       KmsKeyId: !If [ProvideKMSKey, !Ref KMSKey, !Ref AWS::NoValue]
+
+  rMountEBS2:
+    Condition: CreateInstance2
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref rInstance2
+      VolumeId: !Ref rDataVolume2
+      Device: /dev/sdf
+
+  rInstance3:
+    Condition: CreateInstance3
+    Type: "AWS::EC2::Instance"
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !FindInMap
+        - RegionMap
+        - !Ref "AWS::Region"
+        - HVM64
+      KeyName: !Ref KeyName
+      SecurityGroupIds:
+        - !If [CreateNewSG, !GetAtt rSG.GroupId, !Ref SecurityGroup]
+      Tags:
+        - Key: Name
+          Value: !Sub "${TagName}-3"
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+          - "\n"
+          - - '#!/bin/bash'
+            - 'set -e'
+            - 'echo "Starting instance initialization..."'
+            - 'dnf update -y'
+            - 'dnf install -y lvm2 xfsprogs'
+            - 'echo "Installed necessary packages"'
+            - |
+              # Check for root privileges
+              if [ "$EUID" -ne 0 ]; then
+                  echo "Please run as root"
+                  exit 1
+              fi
+
+              # Check if /opt is already mounted
+              if mount | grep /opt > /dev/null; then
+                  echo "/opt is already mounted"
+                  exit 1
+              fi
+
+              # Check if /dev/nvme1n1 exists
+              if ! [ -b /dev/nvme1n1 ]; then
+                  echo "/dev/nvme1n1 does not exist"
+                  exit 1
+              fi
+
+              # Customize these variables according to your needs
+              VG_NAME="vg01"
+              ROOT_DEVICE="/dev/nvme1n1"
+
+              # Create LVM VG
+              echo "$ROOT_DEVICE exists. Creating LVM VG '$VG_NAME'..."
+              vgcreate "$VG_NAME" "$ROOT_DEVICE" || { echo "Error creating LVM VG '$VG_NAME'."; exit 1; }
+
+              # Create LVM LV 'opt' using all available space in 'vg01'
+              lvcreate -n opt -l 100%FREE "$VG_NAME" || { echo "Error creating LVM LV 'opt' in '$VG_NAME'."; exit 1; }
+
+              # Create a new XFS file system
+              mkfs.xfs "/dev/$VG_NAME/opt" || { echo "Error creating XFS file system."; exit 1; }
+
+              # Mount the new file system on /opt
+              mount "/dev/$VG_NAME/opt" /opt || { echo "Failed to mount /opt"; exit 1; }
+
+              # Add an entry to /etc/fstab to automount /opt on boot
+              echo "/dev/mapper/$VG_NAME-opt /opt xfs defaults 0 0" >> /etc/fstab || { echo "Failed to update /etc/fstab"; exit 1; }
+
+            - 'echo "Instance initialization completed successfully."'
+  
+  rDataVolume3:
+    Condition: CreateInstance3
+    Type: AWS::EC2::Volume
+    Properties:
+      VolumeType: gp3
+      AvailabilityZone: !GetAtt rInstance3.AvailabilityZone
+      Size: !Ref DataVolumeSizeGB
+      KmsKeyId: !If [ProvideKMSKey, !Ref KMSKey, !Ref AWS::NoValue]
+
+  rMountEBS3:
+    Condition: CreateInstance3
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref rInstance3
+      VolumeId: !Ref rDataVolume3
+      Device: /dev/sdf
+
+  rInstance4:
+    Condition: CreateInstance4
+    Type: "AWS::EC2::Instance"
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !FindInMap
+        - RegionMap
+        - !Ref "AWS::Region"
+        - HVM64
+      KeyName: !Ref KeyName
+      SecurityGroupIds:
+        - !If [CreateNewSG, !GetAtt rSG.GroupId, !Ref SecurityGroup]
+      Tags:
+        - Key: Name
+          Value: !Sub "${TagName}-4"
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+          - "\n"
+          - - '#!/bin/bash'
+            - 'set -e'
+            - 'echo "Starting instance initialization..."'
+            - 'dnf update -y'
+            - 'dnf install -y lvm2 xfsprogs'
+            - 'echo "Installed necessary packages"'
+            - |
+              # Check for root privileges
+              if [ "$EUID" -ne 0 ]; then
+                  echo "Please run as root"
+                  exit 1
+              fi
+
+              # Check if /opt is already mounted
+              if mount | grep /opt > /dev/null; then
+                  echo "/opt is already mounted"
+                  exit 1
+              fi
+
+              # Check if /dev/nvme1n1 exists
+              if ! [ -b /dev/nvme1n1 ]; then
+                  echo "/dev/nvme1n1 does not exist"
+                  exit 1
+              fi
+
+              # Customize these variables according to your needs
+              VG_NAME="vg01"
+              ROOT_DEVICE="/dev/nvme1n1"
+
+              # Create LVM VG
+              echo "$ROOT_DEVICE exists. Creating LVM VG '$VG_NAME'..."
+              vgcreate "$VG_NAME" "$ROOT_DEVICE" || { echo "Error creating LVM VG '$VG_NAME'."; exit 1; }
+
+              # Create LVM LV 'opt' using all available space in 'vg01'
+              lvcreate -n opt -l 100%FREE "$VG_NAME" || { echo "Error creating LVM LV 'opt' in '$VG_NAME'."; exit 1; }
+
+              # Create a new XFS file system
+              mkfs.xfs "/dev/$VG_NAME/opt" || { echo "Error creating XFS file system."; exit 1; }
+
+              # Mount the new file system on /opt
+              mount "/dev/$VG_NAME/opt" /opt || { echo "Failed to mount /opt"; exit 1; }
+
+              # Add an entry to /etc/fstab to automount /opt on boot
+              echo "/dev/mapper/$VG_NAME-opt /opt xfs defaults 0 0" >> /etc/fstab || { echo "Failed to update /etc/fstab"; exit 1; }
+
+            - 'echo "Instance initialization completed successfully."'
+
+  rDataVolume4:
+    Condition: CreateInstance4
+    Type: AWS::EC2::Volume
+    Properties:
+      VolumeType: gp3
+      AvailabilityZone: !GetAtt rInstance4.AvailabilityZone
+      Size: !Ref DataVolumeSizeGB
+      KmsKeyId: !If [ProvideKMSKey, !Ref KMSKey, !Ref AWS::NoValue]
+
+  rMountEBS4:
+    Condition: CreateInstance4
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref rInstance4
+      VolumeId: !Ref rDataVolume4
+      Device: /dev/sdf
+  
