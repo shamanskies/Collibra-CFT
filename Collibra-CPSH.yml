@@ -157,6 +157,28 @@ Resources:
       ToPort: 22
       Description: Collibra Shell
 
+  rCollibraAllTCPSGRule:
+    Condition: CreateNewSG
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt rSG.GroupId
+      IpProtocol: tcp
+      FromPort: 0
+      ToPort: 65535
+      SourceSecurityGroupId: !GetAtt rSG.GroupId
+      Description: Allow all TCP traffic within the security group
+
+  rCollibraICMPRule:
+    Condition: CreateNewSG
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt rSG.GroupId
+      IpProtocol: icmp
+      FromPort: -1
+      ToPort: -1
+      SourceSecurityGroupId: !GetAtt rSG.GroupId
+      Description: Allow all ICMP IPv4 traffic
+
   rCollibraDGRule:
     Condition: BuildSGDGCRule
     Type: AWS::EC2::SecurityGroupIngress
